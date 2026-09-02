@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Union
+from typing import Any, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -21,6 +21,25 @@ def _unbroadcast(grad: Array, target_shape: tuple[int, ...]) -> Array:
         if dim == 1 and grad.shape[axis] != 1:
             grad = grad.sum(axis=axis, keepdims=True)
     return grad.reshape(target_shape)
+
+
+Axis = int | tuple[int, ...] | None
+
+
+def _normalize_axes(axis: Axis, ndim: int) -> tuple[int, ...]:
+    if axis is None:
+        return tuple(range(ndim))
+    if isinstance(axis, int):
+        return (axis % ndim,)
+    return tuple(a % ndim for a in axis)
+
+
+def _restore_reduced_dims(grad: Array, shape: tuple[int, ...], axis: Axis, keepdims: bool) -> Array:
+    """Re-insert axes collapsed by a reduction (as size-1) so grad can broadcast against shape."""
+    if not keepdims:
+        for ax in sorted(_normalize_axes(axis, len(shape))):
+            grad = np.expand_dims(grad, ax)
+    return grad
 
 
 def _ensure_tensor(x: TensorLike) -> Tensor:
@@ -235,3 +254,115 @@ class Tensor:
             return contributions
 
         return _make(data, (self, other_t), _backward)
+
+    # ---- reductions ----
+
+    def sum(self, axis: Axis = None, keepdims: bool = False) -> Tensor:
+        data = self.data.sum(axis=axis, keepdims=keepdims)
+        shape = self.data.shape
+
+        def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
+            if not self.requires_grad:
+                return []
+            restored = _restore_reduced_dims(grad_output, shape, axis, keepdims)
+            return [(self, np.broadcast_to(restored, shape))]
+
+        return _make(data, (self,), _backward)
+
+    def mean(self, axis: Axis = None, keepdims: bool = False) -> Tensor:
+        data = self.data.mean(axis=axis, keepdims=keepdims)
+        shape = self.data.shape
+        count = np.prod([shape[ax] for ax in _normalize_axes(axis, len(shape))])
+
+        def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
+            if not self.requires_grad:
+                return []
+            restored = _restore_reduced_dims(grad_output, shape, axis, keepdims)
+            return [(self, np.broadcast_to(restored, shape) / count)]
+
+        return _make(data, (self,), _backward)
+
+    def max(self, axis: Axis = None, keepdims: bool = False) -> Tensor:
+        return self._minmax(np.max, axis, keepdims)
+
+    def min(self, axis: Axis = None, keepdims: bool = False) -> Tensor:
+        return self._minmax(np.min, axis, keepdims)
+
+    def _minmax(self, reducer: Callable[..., Array], axis: Axis, keepdims: bool) -> Tensor:
+        reduced = reducer(self.data, axis=axis, keepdims=True)
+        # Ties split the gradient evenly across the tied elements.
+        mask = (self.data == reduced).astype(np.float64)
+        mask = mask / mask.sum(axis=axis, keepdims=True)
+        shape = self.data.shape
+        data = reduced if keepdims else np.squeeze(reduced, axis=axis)
+
+        def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
+            if not self.requires_grad:
+                return []
+            restored = _restore_reduced_dims(grad_output, shape, axis, keepdims)
+            return [(self, mask * restored)]
+
+        return _make(data, (self,), _backward)
+
+    # ---- shape ops ----
+
+    def reshape(self, *shape: int | tuple[int, ...]) -> Tensor:
+        new_shape = shape[0] if len(shape) == 1 and isinstance(shape[0], tuple) else shape
+        data = self.data.reshape(new_shape)
+        orig_shape = self.data.shape
+
+        def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
+            return [(self, grad_output.reshape(orig_shape))] if self.requires_grad else []
+
+        return _make(data, (self,), _backward)
+
+    def transpose(self, *axes: int) -> Tensor:
+        axes_: tuple[int, ...] | None = axes if axes else None
+        data = self.data.transpose(axes_)
+
+        def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
+            if not self.requires_grad:
+                return []
+            if axes_ is None:
+                grad = grad_output.transpose()
+            else:
+                grad = grad_output.transpose(tuple(np.argsort(axes_)))
+            return [(self, grad)]
+
+        return _make(data, (self,), _backward)
+
+    @property
+    def T(self) -> Tensor:
+        return self.transpose()
+
+    def __getitem__(self, idx: Any) -> Tensor:
+        data = self.data[idx]
+        shape = self.data.shape
+        dtype = self.data.dtype
+
+        def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
+            if not self.requires_grad:
+                return []
+            grad = np.zeros(shape, dtype=dtype)
+            np.add.at(grad, idx, grad_output)
+            return [(self, grad)]
+
+        return _make(data, (self,), _backward)
+
+    # ---- transcendental ops ----
+
+    def exp(self) -> Tensor:
+        data = np.exp(self.data)
+
+        def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
+            return [(self, grad_output * data)] if self.requires_grad else []
+
+        return _make(data, (self,), _backward)
+
+    def log(self) -> Tensor:
+        data = np.log(self.data)
+
+        def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
+            return [(self, grad_output / self.data)] if self.requires_grad else []
+
+        return _make(data, (self,), _backward)
