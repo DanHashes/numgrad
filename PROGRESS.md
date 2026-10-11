@@ -5,7 +5,7 @@
 - [x] Step 3 — Extended ops and numerical stability
 - [x] Step 4 — Neural network layers (fully connected)
 - [x] Step 5 — Convolution and the vectorization case study
-- [ ] Step 6 — Optimizers and training utilities
+- [x] Step 6 — Optimizers and training utilities
 - [ ] Step 7 — MNIST data pipeline
 - [ ] Step 8 — Capstone: train on MNIST
 - [ ] Step 9 — Test hardening, profiling, and CI finalization
@@ -54,3 +54,11 @@ Correctness: gradient-checked `Conv2d`/`MaxPool2d` (input, weight, and bias sepa
 Headline benchmark: `benchmarks/bench_conv.py` times a pure-Python 4-nested-loop convolution (batch, output channel, output row, output col, with the kernel-window sum done per output pixel) against the im2col+matmul version. Observed speedups ranged from **16× up to ~500×** across input sizes up to `(4,8,32,32)` with a `16`-channel `3x3` kernel — squarely in the "one to two orders of magnitude" range the plan anticipated, and the clearest evidence yet for why vectorization matters: NumPy pushes the same arithmetic into contiguous-memory, BLAS-backed C loops instead of paying Python's per-element interpreter overhead on every multiply-add.
 
 All 232 tests pass; `ruff check .` and `mypy src` (strict) both clean.
+
+### Step 6 — Optimizers and training utilities
+
+Added `src/numgrad/optim/`: an `Optimizer` base (`parameters`, `lr`, `zero_grad()`), `SGD` (classic undampened momentum: `v = momentum*v + grad`, `p -= lr*v`), `Adam` (explicit bias-corrected moment estimates, following Kingma & Ba 2015 directly), and `CosineAnnealingLR` as a standalone scheduler that mutates an optimizer's `.lr` attribute rather than being baked into the optimizer. Added `src/numgrad/data/`: `DataLoader` (shuffled mini-batches per iteration, reproducible via an injected `np.random.Generator`), `train_test_split`, and `one_hot`.
+
+Debugging note worth flagging: while writing the Adam bias-correction test, I initially asserted the wrong direction — guessed that skipping correction would make early updates too *small*. Checking the actual arithmetic (`beta1=0.9, beta2=0.999, g=2.0`) showed the opposite: the uncorrected first update is over 3x *larger* than the corrected one. The reason is `v`'s bias dominates `m`'s, since `beta2` is far closer to 1 than `beta1`, so `v` stays underestimated for much longer — dividing by its too-small `sqrt(v)` inflates the step rather than shrinking it. Fixed the test assertion and the explanatory comment to match; this is exactly the kind of thing gradient/numerical checking is for — catching a plausible-sounding but wrong mental model before it ships. A separate test demonstrates a cleaner, provable property: with `m0=v0=0` and a *constant* gradient, bias correction exactly cancels the EMA startup transient (`m_hat_t = g` for every `t`, by induction), giving an identical update at every single step from `t=1` onward.
+
+Convergence tests train a `Linear` layer on synthetic linear regression (known ground-truth weights) with both `SGD` and `Adam`, driving loss to near-zero within 300 steps; `DataLoader`/`train_test_split` are checked for correct batch counts/shapes, reproducible shuffling with a fixed seed, and disjoint/complete train-test partitions. All 259 tests pass; `ruff check .` and `mypy src` (strict) both clean.
