@@ -7,7 +7,7 @@
 - [x] Step 5 — Convolution and the vectorization case study
 - [x] Step 6 — Optimizers and training utilities
 - [x] Step 7 — MNIST data pipeline
-- [ ] Step 8 — Capstone: train on MNIST
+- [x] Step 8 — Capstone: train on MNIST
 - [ ] Step 9 — Test hardening, profiling, and CI finalization
 - [ ] Step 10 — Documentation and release
 
@@ -70,3 +70,18 @@ Added `src/numgrad/data/mnist.py`: `load_mnist()` downloads and caches the four 
 `make_synthetic_mnist()` is the CI-safe fallback: each class gets one fixed random "template" image, and every sample is that template plus Gaussian noise, clipped to `[0, 1]` — shaped identically to real MNIST (so the same model/training code runs against either) but with zero network dependency. A nearest-centroid-classifier test confirms it's actually structured data (>50% accuracy vs. 10% chance), not just noise. `flatten_images()` gives the `(N, 784)` view Step 8's MLP path needs alongside the `(N, 1, 28, 28)` view Conv2d needs.
 
 Testing: the IDX parser is tested by hand-constructing tiny fake gzipped IDX files (no network needed) and round-tripping them, plus a bad-magic-number rejection test. The real-download test is gated behind `NUMGRAD_RUN_NETWORK_TESTS=1` (skipped by default, so CI never touches the network) — confirmed it passes when explicitly enabled. All 269 tests pass (1 skipped by default, as intended); `ruff check .` and `mypy src` (strict) both clean.
+
+### Step 8 — Capstone: train on MNIST
+
+Added `scripts/train.py`: an `argparse` CLI (`--model mlp|cnn`, `--epochs`, `--batch-size`, `--lr`, `--optimizer sgd|adam`, `--momentum`, `--dropout`, `--clip-grad-norm`, `--synthetic` for a quick network-free run) that builds either model purely from Steps 4–6 components, trains with a real loop (`cross_entropy` → `backward()` → `clip_grad_norm()` → optimizer `step()` → `zero_grad()`), logs per-epoch train/val loss and accuracy, evaluates on the held-out test set, saves a checkpoint (`np.savez` of the flat parameter list, keyed by index) with a matching `load_checkpoint()` that rebuilds the architecture and reloads the weights, and plots loss/accuracy curves to `docs/assets/training_curves_{model}.png`.
+
+**Results on real MNIST** (10% of the training set held out for validation, full 10k official test set held out entirely until the end):
+
+| Model | Epochs | Optimizer | Test accuracy | Test loss | Time/epoch |
+|---|---|---|---|---|---|
+| MLP (784→256→128→10, dropout 0.2) | 15 | Adam, lr=1e-3 | **98.13%** | 0.0692 | ~6s |
+| CNN (conv8→pool→conv16→pool→64→10) | 8 | Adam, lr=1e-3 | **98.77%** | 0.0370 | ~50s |
+
+Both comfortably clear the ≥95% target; the CNN outperforms the MLP as expected, by 0.64pp, at roughly 8x the per-epoch cost — consistent with the extra im2col/matmul work per batch, and a nice concrete number for the "was the extra convolution complexity worth it" question. Training curves for both are saved and show healthy behavior: loss drops smoothly, and the MLP's train/val gap widens over epochs (expected overfitting on a plain MLP, partially checked by dropout) while the CNN's train and val curves stay close together throughout, which tracks with its convolutional weight-sharing acting as a much stronger implicit regularizer. Checkpoints (`checkpoints/*.npz`, gitignored — reproducible via this script, not meant to be versioned) reload and reproduce identical predictions, verified in `tests/test_train_script.py`.
+
+Testing: a synthetic-data smoke test runs the full `train()` pipeline end-to-end (both model types, 2 epochs) in CI without any network access, a checkpoint round-trip test confirms reloaded weights reproduce identical outputs, and a shape test checks both architectures produce `(N, 10)` logits. All 273 tests pass (1 network test still skipped by default); `ruff check .` and `mypy src` (strict) both clean.
