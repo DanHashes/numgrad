@@ -3,7 +3,7 @@
 - [x] Step 1 — Repository scaffolding
 - [x] Step 2 — Core `Tensor` and the autodiff engine
 - [x] Step 3 — Extended ops and numerical stability
-- [ ] Step 4 — Neural network layers (fully connected)
+- [x] Step 4 — Neural network layers (fully connected)
 - [ ] Step 5 — Convolution and the vectorization case study
 - [ ] Step 6 — Optimizers and training utilities
 - [ ] Step 7 — MNIST data pipeline
@@ -36,3 +36,11 @@ Added `clip_grad_norm(parameters, max_norm)` for later training use — rescales
 `benchmarks/bench_naive_vs_vectorized.py` times a pure-Python nested-loop elementwise-multiply-and-sum against the vectorized `Tensor` version across sizes up to 1024×1024, printing a speedup table (observed roughly 4×–40× in this run — the first concrete data point for the "why vectorize" story that Step 5's convolution benchmark will build on).
 
 All 173 tests pass; `ruff check .` and `mypy src` (strict) both clean.
+
+### Step 4 — Neural network layers (fully connected)
+
+Added `src/numgrad/nn/`: a `Module` base class whose `__setattr__` auto-registers any `Tensor` with `requires_grad=True` as a parameter and any `Module` as a submodule, so `.parameters()`, `.zero_grad()`, and `.train()`/`.eval()` all recurse correctly through arbitrarily nested structures without any manual bookkeeping. `Linear` initializes its weight with Kaiming/He normal init (`std = sqrt(2/fan_in)`, implemented directly rather than hardcoded) — chosen over Xavier because it's derived specifically to counteract ReLU zeroing out about half its inputs on average, which is the activation this project's MLP/CNN actually use. `ReLU`/`Sigmoid`/`Tanh` are thin `Module` wrappers around new `Tensor` primitives (`relu`/`sigmoid`/`tanh`); `GELU` and `Dropout` (inverted, train-time-only scaling) are implemented as `Module`s. `Sequential` chains layers and registers each into `_modules` by index so parameter discovery and forward order match.
+
+Caught a second real numerical bug the same way Step 2's compounding-gradient bug was caught — by testing, not inspection: the first `sigmoid()` used `np.where(cond, branch_a, branch_b)` to pick the overflow-safe formula per element, but NumPy evaluates *both* branches eagerly before selecting, so the unused branch still overflowed (`exp(-x)` for very negative `x`, `exp(x)` for very positive `x`) — invisible in the final result only because `inf`'s limiting value happened to be correct, but producing the exact same `RuntimeWarning: overflow encountered in exp` that Step 3's naive-softmax test exists to catch. A test with `x = [-1e4, 1e4]` surfaced the warning. Fixed by masking the *input* array before exponentiating (`exp(-x[x>=0])`, `exp(x[x<0])`) so only the safe branch is ever computed per element — this is the actual technique behind `scipy.special.expit`.
+
+End-to-end gradient checks run through a full `Sequential(Linear, ReLU, Linear)` stack — both with respect to the input and to each layer's parameters directly, by perturbing the exact `Tensor` objects `model.parameters()` returns in place (no need to reconstruct or swap anything, since the model holds live references) — which catches graph-wiring bugs that per-op tests alone would miss. All 208 tests pass; `ruff check .` and `mypy src` (strict) both clean.

@@ -366,3 +366,38 @@ class Tensor:
             return [(self, grad_output / self.data)] if self.requires_grad else []
 
         return _make(data, (self,), _backward)
+
+    def relu(self) -> Tensor:
+        data = np.maximum(self.data, 0.0)
+
+        def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
+            return [(self, grad_output * (self.data > 0))] if self.requires_grad else []
+
+        return _make(data, (self,), _backward)
+
+    def sigmoid(self) -> Tensor:
+        # Mask the INPUT before exponentiating (not just select the output
+        # after) so only the overflow-safe branch is ever evaluated per
+        # element: np.where/np.select compute both branches eagerly, so
+        # selecting after exponentiating would still overflow on the unused
+        # branch. Same stability concern as the log-sum-exp trick in
+        # functional.log_softmax.
+        data = np.empty_like(self.data)
+        pos = self.data >= 0
+        neg = ~pos
+        data[pos] = 1.0 / (1.0 + np.exp(-self.data[pos]))
+        exp_neg = np.exp(self.data[neg])
+        data[neg] = exp_neg / (1.0 + exp_neg)
+
+        def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
+            return [(self, grad_output * data * (1.0 - data))] if self.requires_grad else []
+
+        return _make(data, (self,), _backward)
+
+    def tanh(self) -> Tensor:
+        data = np.tanh(self.data)  # numpy's tanh is already numerically stable
+
+        def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
+            return [(self, grad_output * (1.0 - data**2))] if self.requires_grad else []
+
+        return _make(data, (self,), _backward)
