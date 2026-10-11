@@ -220,7 +220,7 @@ class Tensor:
         data = -self.data
 
         def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
-            return [(self, -grad_output)] if self.requires_grad else []
+            return [(self, -grad_output)]
 
         return _make(data, (self,), _backward)
 
@@ -230,8 +230,6 @@ class Tensor:
         data = self.data**exponent
 
         def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
-            if not self.requires_grad:
-                return []
             local_grad = exponent * self.data ** (exponent - 1)
             return [(self, grad_output * local_grad)]
 
@@ -262,8 +260,6 @@ class Tensor:
         shape = self.data.shape
 
         def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
-            if not self.requires_grad:
-                return []
             restored = _restore_reduced_dims(grad_output, shape, axis, keepdims)
             return [(self, np.broadcast_to(restored, shape))]
 
@@ -275,8 +271,6 @@ class Tensor:
         count = np.prod([shape[ax] for ax in _normalize_axes(axis, len(shape))])
 
         def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
-            if not self.requires_grad:
-                return []
             restored = _restore_reduced_dims(grad_output, shape, axis, keepdims)
             return [(self, np.broadcast_to(restored, shape) / count)]
 
@@ -297,8 +291,6 @@ class Tensor:
         data = reduced if keepdims else np.squeeze(reduced, axis=axis)
 
         def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
-            if not self.requires_grad:
-                return []
             restored = _restore_reduced_dims(grad_output, shape, axis, keepdims)
             return [(self, mask * restored)]
 
@@ -312,7 +304,7 @@ class Tensor:
         orig_shape = self.data.shape
 
         def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
-            return [(self, grad_output.reshape(orig_shape))] if self.requires_grad else []
+            return [(self, grad_output.reshape(orig_shape))]
 
         return _make(data, (self,), _backward)
 
@@ -321,8 +313,6 @@ class Tensor:
         data = self.data.transpose(axes_)
 
         def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
-            if not self.requires_grad:
-                return []
             if axes_ is None:
                 grad = grad_output.transpose()
             else:
@@ -341,8 +331,6 @@ class Tensor:
         dtype = self.data.dtype
 
         def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
-            if not self.requires_grad:
-                return []
             grad = np.zeros(shape, dtype=dtype)
             np.add.at(grad, idx, grad_output)
             return [(self, grad)]
@@ -355,7 +343,7 @@ class Tensor:
         data = np.exp(self.data)
 
         def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
-            return [(self, grad_output * data)] if self.requires_grad else []
+            return [(self, grad_output * data)]
 
         return _make(data, (self,), _backward)
 
@@ -363,7 +351,7 @@ class Tensor:
         data = np.log(self.data)
 
         def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
-            return [(self, grad_output / self.data)] if self.requires_grad else []
+            return [(self, grad_output / self.data)]
 
         return _make(data, (self,), _backward)
 
@@ -371,7 +359,7 @@ class Tensor:
         data = np.maximum(self.data, 0.0)
 
         def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
-            return [(self, grad_output * (self.data > 0))] if self.requires_grad else []
+            return [(self, grad_output * (self.data > 0))]
 
         return _make(data, (self,), _backward)
 
@@ -390,7 +378,7 @@ class Tensor:
         data[neg] = exp_neg / (1.0 + exp_neg)
 
         def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
-            return [(self, grad_output * data * (1.0 - data))] if self.requires_grad else []
+            return [(self, grad_output * data * (1.0 - data))]
 
         return _make(data, (self,), _backward)
 
@@ -398,6 +386,6 @@ class Tensor:
         data = np.tanh(self.data)  # numpy's tanh is already numerically stable
 
         def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
-            return [(self, grad_output * (1.0 - data**2))] if self.requires_grad else []
+            return [(self, grad_output * (1.0 - data**2))]
 
         return _make(data, (self,), _backward)

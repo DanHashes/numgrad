@@ -8,7 +8,7 @@
 - [x] Step 6 — Optimizers and training utilities
 - [x] Step 7 — MNIST data pipeline
 - [x] Step 8 — Capstone: train on MNIST
-- [ ] Step 9 — Test hardening, profiling, and CI finalization
+- [x] Step 9 — Test hardening, profiling, and CI finalization
 - [ ] Step 10 — Documentation and release
 
 ## Step summaries
@@ -85,3 +85,18 @@ Added `scripts/train.py`: an `argparse` CLI (`--model mlp|cnn`, `--epochs`, `--b
 Both comfortably clear the ≥95% target; the CNN outperforms the MLP as expected, by 0.64pp, at roughly 8x the per-epoch cost — consistent with the extra im2col/matmul work per batch, and a nice concrete number for the "was the extra convolution complexity worth it" question. Training curves for both are saved and show healthy behavior: loss drops smoothly, and the MLP's train/val gap widens over epochs (expected overfitting on a plain MLP, partially checked by dropout) while the CNN's train and val curves stay close together throughout, which tracks with its convolutional weight-sharing acting as a much stronger implicit regularizer. Checkpoints (`checkpoints/*.npz`, gitignored — reproducible via this script, not meant to be versioned) reload and reproduce identical predictions, verified in `tests/test_train_script.py`.
 
 Testing: a synthetic-data smoke test runs the full `train()` pipeline end-to-end (both model types, 2 epochs) in CI without any network access, a checkpoint round-trip test confirms reloaded weights reproduce identical outputs, and a shape test checks both architectures produce `(N, 10)` logits. All 273 tests pass (1 network test still skipped by default); `ruff check .` and `mypy src` (strict) both clean.
+
+### Step 9 — Test hardening, profiling, and CI finalization
+
+**Coverage.** `pytest --cov=src/numgrad --cov-report=term-missing` started at 95%. The gaps broke into two real categories, not noise:
+
+1. Every single-input `Tensor` op (`neg`, `pow`, `sum`, `mean`, `max`/`min`, `reshape`, `transpose`, `__getitem__`, `exp`, `log`, `relu`, `sigmoid`, `tanh`) plus `nn.functional.max_pool2d` had an `if not self.requires_grad: return []` guard inside its backward closure that coverage flagged as never hit. Turned out to be genuinely *unreachable*: `_make()` only ever attaches a `_backward` function when at least one parent requires grad, and for a single-parent op that parent *is* `self` — so the guard could never see `False`. Deleted all eleven occurrences rather than writing contrived tests to hit dead code; the analogous guards on multi-parent ops (`add`, `mul`, `matmul`, `conv2d`, ...) are real (any individual operand can legitimately not require grad) and stayed.
+2. Genuine gaps: multi-axis (tuple) reductions (`a.sum(axis=(0,2))`) were never gradient-checked, `Tensor.__pow__`'s scalar-exponent-only validation was untested, `Module.forward`/`Optimizer.step`'s abstract `NotImplementedError` stubs were untested, and `Adam`'s "skip parameters with no gradient" branch (tested for `SGD`, not `Adam`) was missing. Added `tests/test_coverage_gaps.py` for all of these.
+
+Net result: **97% overall, 100% on every file except `data/mnist.py` (69%)** — the real-MNIST download/parse path, which needs live network access and is deliberately not exercised in CI (consistent with Step 7's design and the plan's own guidance); accepted with this one-line reason rather than mocking urllib for the sake of a number.
+
+**Profiling** (`docs/profiling.md` has the full writeup). `cProfile` around one real CNN training epoch surfaced a genuine surprise: `np.einsum` — used in `conv2d`'s backward for `d_weight`/`d_cols` — was the single largest cost in the whole epoch at 15.3s of 51.1s (~30%), bigger than the forward convolution itself. The assumption going in was "convolution will be the bottleneck," which was half right: it was convolution, but specifically the backward pass's generic `einsum` contraction, which doesn't route through BLAS the way `@` does for the same math. Rewrote both contractions as batched matmuls (`(grad_flat @ cols.transpose(0,2,1)).sum(axis=0)` and `weight_flat.T[None] @ grad_flat`), verified numerically identical (`np.allclose`, all existing gradchecks still pass) and 2.9x/4.5x faster in isolation. End to end: **epoch time dropped from 47.1s to 34-35s (~26-28% faster)**, confirmed both under profiling and in a full real 8-epoch retraining run (identical 98.77% test accuracy, same seed — only the wall-clock time changed). `tracemalloc` on one forward+backward batch found the CNN uses ~11x more memory than the MLP (76.7MB vs 6.8MB peak), dominated by `im2col`'s materialized, `kernel_h*kernel_w`-replicated column buffers staying alive for the life of the graph (captured by `conv2d`'s backward closure) — a real, inherent space/time tradeoff of the im2col approach, documented rather than "fixed," since trading memory for the earlier 16-500x conv speedup (Step 5) is clearly the right call here.
+
+**CI finalization.** Split `.github/workflows/ci.yml` into three separate gating jobs — `lint` (`ruff check .`), `typecheck` (`mypy src`), and `test` (matrix across Python 3.10/3.11/3.12, `pytest` with `NUMGRAD_RUN_NETWORK_TESTS` left unset so it runs entirely against the synthetic MNIST fallback) — and added the CI status badge to the README now (full README rewrite is Step 10).
+
+All 284 tests pass (1 skipped by default, as intended); `ruff check .` and `mypy src` (strict) both clean.

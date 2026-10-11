@@ -61,6 +61,12 @@ def conv2d(x: Tensor, weight: Tensor, bias: Tensor, stride: int, padding: int) -
     reshaped kernel against the im2col'd input; backward applies ordinary
     matmul gradient rules to get d_weight, and col2im (im2col's inverse) to
     scatter the column-space gradient back onto the input.
+
+    d_weight/d_cols are expressed as batched matmuls (`@`), not `np.einsum`:
+    profiling the Step 8 training loop (docs/profiling.md) found einsum was
+    the single largest cost in the whole run, ~3-4.5x slower here than the
+    equivalent matmul despite computing the same contraction — einsum's
+    general-purpose evaluator doesn't route through BLAS the way `@` does.
     """
     n, _, h, w = x.data.shape
     c_out, _, kh, kw = weight.data.shape
@@ -79,10 +85,12 @@ def conv2d(x: Tensor, weight: Tensor, bias: Tensor, stride: int, padding: int) -
         if bias.requires_grad:
             contributions.append((bias, grad_flat.sum(axis=(0, 2))))
         if weight.requires_grad:
-            d_weight = np.einsum("nop,nkp->ok", grad_flat, cols).reshape(weight.data.shape)
-            contributions.append((weight, d_weight))
+            # sum_n grad_flat[n] @ cols[n].T -> (C_out, K)
+            d_weight = (grad_flat @ cols.transpose(0, 2, 1)).sum(axis=0)
+            contributions.append((weight, d_weight.reshape(weight.data.shape)))
         if x.requires_grad:
-            d_cols = np.einsum("nop,ok->nkp", grad_flat, weight_flat)
+            # weight_flat.T @ grad_flat[n] -> (K, out_h*out_w), per batch
+            d_cols = weight_flat.T[None, :, :] @ grad_flat
             d_x = col2im(d_cols, x.data.shape, kh, kw, stride, padding)
             contributions.append((x, d_x))
         return contributions
@@ -107,8 +115,6 @@ def max_pool2d(x: Tensor, kernel_size: int, stride: int) -> Tensor:
     argmax_idx = cols.argmax(axis=2)  # (N, C, out_h*out_w)
 
     def _backward(grad_output: Array) -> list[tuple[Tensor, Array]]:
-        if not x.requires_grad:
-            return []
         grad_flat = grad_output.reshape(n, c, out_h * out_w)
         d_cols = np.zeros((n, c, kh * kw, out_h * out_w), dtype=x.data.dtype)
         np.put_along_axis(d_cols, argmax_idx[:, :, None, :], grad_flat[:, :, None, :], axis=2)
