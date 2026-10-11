@@ -4,7 +4,7 @@
 - [x] Step 2 — Core `Tensor` and the autodiff engine
 - [x] Step 3 — Extended ops and numerical stability
 - [x] Step 4 — Neural network layers (fully connected)
-- [ ] Step 5 — Convolution and the vectorization case study
+- [x] Step 5 — Convolution and the vectorization case study
 - [ ] Step 6 — Optimizers and training utilities
 - [ ] Step 7 — MNIST data pipeline
 - [ ] Step 8 — Capstone: train on MNIST
@@ -44,3 +44,13 @@ Added `src/numgrad/nn/`: a `Module` base class whose `__setattr__` auto-register
 Caught a second real numerical bug the same way Step 2's compounding-gradient bug was caught — by testing, not inspection: the first `sigmoid()` used `np.where(cond, branch_a, branch_b)` to pick the overflow-safe formula per element, but NumPy evaluates *both* branches eagerly before selecting, so the unused branch still overflowed (`exp(-x)` for very negative `x`, `exp(x)` for very positive `x`) — invisible in the final result only because `inf`'s limiting value happened to be correct, but producing the exact same `RuntimeWarning: overflow encountered in exp` that Step 3's naive-softmax test exists to catch. A test with `x = [-1e4, 1e4]` surfaced the warning. Fixed by masking the *input* array before exponentiating (`exp(-x[x>=0])`, `exp(x[x<0])`) so only the safe branch is ever computed per element — this is the actual technique behind `scipy.special.expit`.
 
 End-to-end gradient checks run through a full `Sequential(Linear, ReLU, Linear)` stack — both with respect to the input and to each layer's parameters directly, by perturbing the exact `Tensor` objects `model.parameters()` returns in place (no need to reconstruct or swap anything, since the model holds live references) — which catches graph-wiring bugs that per-op tests alone would miss. All 208 tests pass; `ruff check .` and `mypy src` (strict) both clean.
+
+### Step 5 — Convolution and the vectorization case study
+
+Added `src/numgrad/nn/functional.py` with `im2col`/`col2im` (built on `numpy.lib.stride_tricks.sliding_window_view` for a copy-free windowed view, plus one transpose+reshape to lay patches out as matmul-ready columns) and `conv2d`/`max_pool2d` as hand-backward Tensor ops (importing the tensor package's internal `_make` helper directly, same low-level mechanism every other custom-backward op in the project uses). `Conv2d` reduces its forward pass to one matmul of the reshaped kernel against `im2col(x)`; its backward applies ordinary matmul gradient rules for `d_weight`/`d_bias` and uses `col2im` (im2col's inverse, scatter-adding overlapping patch gradients back onto the padded input then cropping) for `d_x`. `MaxPool2d` reuses the same im2col windowing but maxes within each channel independently (no cross-channel matmul), routing gradient to the first-occurrence argmax per window — a deliberate difference from `Tensor.max()`'s tie-splitting in Step 3, matching how pooling is conventionally implemented. `Conv2d`/`MaxPool2d`/`Flatten` are thin `Module` wrappers; `Conv2d` uses the same Kaiming/He init as `Linear`.
+
+Correctness: gradient-checked `Conv2d`/`MaxPool2d` (input, weight, and bias separately) across multiple shapes/strides/padding, a hand-computed-sum sanity check for a trivial all-ones kernel, an explicit tie-breaking test for `MaxPool2d`, a `col2im`-is-left-inverse-of-`im2col` check on non-overlapping patches, and an end-to-end `Conv2d → MaxPool2d → Flatten → Linear` gradcheck.
+
+Headline benchmark: `benchmarks/bench_conv.py` times a pure-Python 4-nested-loop convolution (batch, output channel, output row, output col, with the kernel-window sum done per output pixel) against the im2col+matmul version. Observed speedups ranged from **16× up to ~500×** across input sizes up to `(4,8,32,32)` with a `16`-channel `3x3` kernel — squarely in the "one to two orders of magnitude" range the plan anticipated, and the clearest evidence yet for why vectorization matters: NumPy pushes the same arithmetic into contiguous-memory, BLAS-backed C loops instead of paying Python's per-element interpreter overhead on every multiply-add.
+
+All 232 tests pass; `ruff check .` and `mypy src` (strict) both clean.
