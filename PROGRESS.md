@@ -9,7 +9,7 @@
 - [x] Step 7 — MNIST data pipeline
 - [x] Step 8 — Capstone: train on MNIST
 - [x] Step 9 — Test hardening, profiling, and CI finalization
-- [ ] Step 10 — Documentation and release
+- [x] Step 10 — Documentation and release
 
 ## Step summaries
 
@@ -100,3 +100,15 @@ Net result: **97% overall, 100% on every file except `data/mnist.py` (69%)** —
 **CI finalization.** Split `.github/workflows/ci.yml` into three separate gating jobs — `lint` (`ruff check .`), `typecheck` (`mypy src`), and `test` (matrix across Python 3.10/3.11/3.12, `pytest` with `NUMGRAD_RUN_NETWORK_TESTS` left unset so it runs entirely against the synthetic MNIST fallback) — and added the CI status badge to the README now (full README rewrite is Step 10).
 
 All 284 tests pass (1 skipped by default, as intended); `ruff check .` and `mypy src` (strict) both clean.
+
+### Step 10 — Documentation and release
+
+Full `README.md` rewrite: what the project is and why, a Mermaid architecture diagram (`Tensor` → ops/functional → `nn.Module`/layers → `Sequential`, plus `optim` and `data`, feeding `scripts/train.py`), the real MNIST results table, both benchmark tables (Steps 3 and 5) with the actual numbers pulled from this document, a "design decisions" section covering the five choices most worth defending in an interview (broadcasting gradient handling, pure-function backward closures, log-sum-exp + why differentiating through the max is still correct, im2col/col2im as true inverses rather than one function run backward, gradient checking as the correctness contract, `src/` layout + strict typing), and an "interview talking points" section mapping each seed question to exactly where its answer lives in the repo.
+
+`docs/math.md`: full derivations for backprop through matmul (with the shape-sanity-check trick for re-deriving it from memory), backprop through broadcasting (the `_unbroadcast` logic, justified as "broadcasting is a sum run backwards"), the log-sum-exp stability trick plus the algebraic proof that differentiating through the max subtraction is still exactly correct (the two `∂m/∂x_i` terms cancel regardless of how ties are broken), and the `im2col`/`col2im` gradient derivation (why `col2im` has to be a genuinely different function from `im2col` — scatter-add into overlapping regions versus a safe aliasing view).
+
+`CONTRIBUTING.md` documents the one pattern every differentiable op must follow (`_backward` as a pure function of `grad_output`, no `.grad`-reading, no dead-code `requires_grad` guards on single-parent ops) so the two bugs this project's own history caught don't get reintroduced. `CHANGELOG.md` (Keep a Changelog format) records the v0.1.0 feature set and headline results in one place.
+
+Final numbers carried into the docs: **284 tests passing, 97% coverage** (100% outside the network-only MNIST download path), **MLP 98.13%** / **CNN 98.77%** MNIST test accuracy, benchmark speedups of **~4×–40×** (elementwise ops) and **~16×–500×** (convolution), and the **~26% per-epoch speedup** from the Step 9 `einsum`→`matmul` fix.
+
+All 10 steps complete. Tagged and published as the `v0.1.0` GitHub release.
