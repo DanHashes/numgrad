@@ -6,7 +6,7 @@
 - [x] Step 4 — Neural network layers (fully connected)
 - [x] Step 5 — Convolution and the vectorization case study
 - [x] Step 6 — Optimizers and training utilities
-- [ ] Step 7 — MNIST data pipeline
+- [x] Step 7 — MNIST data pipeline
 - [ ] Step 8 — Capstone: train on MNIST
 - [ ] Step 9 — Test hardening, profiling, and CI finalization
 - [ ] Step 10 — Documentation and release
@@ -62,3 +62,11 @@ Added `src/numgrad/optim/`: an `Optimizer` base (`parameters`, `lr`, `zero_grad(
 Debugging note worth flagging: while writing the Adam bias-correction test, I initially asserted the wrong direction — guessed that skipping correction would make early updates too *small*. Checking the actual arithmetic (`beta1=0.9, beta2=0.999, g=2.0`) showed the opposite: the uncorrected first update is over 3x *larger* than the corrected one. The reason is `v`'s bias dominates `m`'s, since `beta2` is far closer to 1 than `beta1`, so `v` stays underestimated for much longer — dividing by its too-small `sqrt(v)` inflates the step rather than shrinking it. Fixed the test assertion and the explanatory comment to match; this is exactly the kind of thing gradient/numerical checking is for — catching a plausible-sounding but wrong mental model before it ships. A separate test demonstrates a cleaner, provable property: with `m0=v0=0` and a *constant* gradient, bias correction exactly cancels the EMA startup transient (`m_hat_t = g` for every `t`, by induction), giving an identical update at every single step from `t=1` onward.
 
 Convergence tests train a `Linear` layer on synthetic linear regression (known ground-truth weights) with both `SGD` and `Adam`, driving loss to near-zero within 300 steps; `DataLoader`/`train_test_split` are checked for correct batch counts/shapes, reproducible shuffling with a fixed seed, and disjoint/complete train-test partitions. All 259 tests pass; `ruff check .` and `mypy src` (strict) both clean.
+
+### Step 7 — MNIST data pipeline
+
+Added `src/numgrad/data/mnist.py`: `load_mnist()` downloads and caches the four gzipped IDX files (stdlib `urllib`/`gzip`/`struct` + NumPy only — no torchvision/sklearn) and parses them per the IDX spec (big-endian magic number + dimensions header, then raw bytes). One note: the original `yann.lecun.com/exdb/mnist/` host has been unreliable for programmatic downloads for years, so this defaults to the `ossci-datasets` S3 mirror — the same one torchvision itself switched to in 2021 — with the base URL left as a parameter to override. Verified against the real dataset in this session: downloads and parses correctly into `(60000, 1, 28, 28)` / `(10000, 1, 28, 28)` float64 arrays in `[0, 1]` with all 10 label classes present in both splits.
+
+`make_synthetic_mnist()` is the CI-safe fallback: each class gets one fixed random "template" image, and every sample is that template plus Gaussian noise, clipped to `[0, 1]` — shaped identically to real MNIST (so the same model/training code runs against either) but with zero network dependency. A nearest-centroid-classifier test confirms it's actually structured data (>50% accuracy vs. 10% chance), not just noise. `flatten_images()` gives the `(N, 784)` view Step 8's MLP path needs alongside the `(N, 1, 28, 28)` view Conv2d needs.
+
+Testing: the IDX parser is tested by hand-constructing tiny fake gzipped IDX files (no network needed) and round-tripping them, plus a bad-magic-number rejection test. The real-download test is gated behind `NUMGRAD_RUN_NETWORK_TESTS=1` (skipped by default, so CI never touches the network) — confirmed it passes when explicitly enabled. All 269 tests pass (1 skipped by default, as intended); `ruff check .` and `mypy src` (strict) both clean.
